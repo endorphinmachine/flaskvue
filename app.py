@@ -1,7 +1,9 @@
-from flask import Flask,render_template,jsonify,request
+from flask import Flask, render_template, jsonify, request, abort
+from flask import current_app as app
 from flask_cors import CORS
 import pymysql
 import json
+import os
 
 
 # 声明app 强指定文件路径
@@ -17,6 +19,8 @@ app.secret_key = 'secretkey'
 db = pymysql.connect(host='localhost', user='root', password='lyz0704.', database='demo', port=3306)
 cursor = db.cursor()
 
+# 文件上传保存路径
+temp_base = os.path.expanduser("./bigfiles")
 
 # 将所有路由指向index.html
 @app.route('/', defaults={'path':' '})
@@ -61,14 +65,71 @@ def register ():
         pass
 
 
-@app.route('/api/get_geojson', methods=['POST'])
-def get_geojson():
+def get_chunk_name(uploader_filename, chunk_number):
+    return uploader_filename + "_part_%03d" %chunk_number
+
+
+# 获取分片信息
+@app.route('/api/upload', methods=['GET'])
+def getChunkInfo ():
+    if request.method == 'GET':
+        identifier = request.args.get('identifier', type=str)
+        fileName = request.args.get('fileName', type=str)
+        chunkNumber = request.args.get('chunkNumber', type=int)
+    
+        if not identifier or not fileName or not chunkNumber:
+            abort(500, 'Parameter error')
+        #PATH DEFINE
+        temp_dir = os.path.join(temp_base, identifier)
+        #getchunkname将filename和chunkNumber拼接并格式化
+        chunk_file = os.path.join(temp_dir, get_chunk_name(fileName, chunkNumber))
+        app.logger.debug('Getting chunk: %s', chunk_file)
+    
+        if os.path.isfile(chunk_file):
+            return jsonify('chunk %s OK', chunkNumber)
+        else:
+            abort(404, 'Not Found')
+
+
+#接收上传的文件并保存
+@app.route('/api/upload', methods=['POST'])
+def upLoading():
     if request.method == 'POST':
-        f = open("beijing.json", encoding="utf8")
-        data = json.loads(f.read())
-        return jsonify(data)
-    else:
-        pass
+        totalChunks = request.form.get('totalChunks', type=int)
+        chunkNumber = request.form.get('chunkNumber', default=1, type=int)
+        fileName = request.form.get('fileName', default='error', type=str)
+        identifier = request.form.get('identifier', default='error', type=str)
+
+        if not identifier or not fileName or not chunkNumber or not totalChunks:
+            print("参数错误")
+    
+        chunk_data = request.files["file"]
+        temp_dir = os.path.join(temp_base, identifier)
+        if not os.path.isdir(temp_dir):
+            os.makedirs(temp_dir, mode=0o777)
+            print("path created")
+        #getchunkname将filename和chunkNumber拼接并格式化
+        chunk_name = get_chunk_name(fileName, chunkNumber)
+        chunk_file = os.path.join(temp_dir, chunk_name)
+        chunk_data.save(chunk_file)
+        app.logger.debug('Saved chunk: %s', chunk_file)
+    
+        chunk_paths = [os.path.join(temp_dir, get_chunk_name(fileName, x)) for x in range(1, totalChunks+1)]
+        upload_complete = all([os.path.exists(p) for p in chunk_paths])
+    
+        if upload_complete:
+            target_file_name = os.path.join(temp_base, fileName)
+            with open(target_file_name, "ab") as target_file:
+                for p in chunk_paths:
+                    stored_chunk_file_name = p
+                    stored_chunk_file = open(stored_chunk_file_name, 'rb')
+                    target_file.write(stored_chunk_file.read())
+                    stored_chunk_file.close()
+                    os.unlink(stored_chunk_file_name)
+            target_file.close()
+            os.rmdir(temp_dir)
+            app.logger.debug('File saved to: %s', target_file_name)
+        return jsonify("Upload complete")
 
 
 @app.route('/dbscan', methods=['POST'])
